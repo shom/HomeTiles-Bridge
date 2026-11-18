@@ -48,6 +48,10 @@ class AssistContractTest(unittest.TestCase):
         self.assertEqual(json.loads(ASSIST.build_start_command(ID, True))["max_ms"], 15000)
         self.assertEqual(json.loads(ASSIST.build_stop_command(ID)),
                          {"v": 1, "op": "stop", "id": ID})
+        self.assertEqual(json.loads(ASSIST.build_turn_end_command(ID)),
+                         {"v": 1, "op": "turn_end", "id": ID})
+        with self.assertRaises(ValueError):
+            ASSIST.build_turn_end_command("XYZ")
         for bad in ("ABCDEF0123456789", "0123", "g" * 16, "a" * 33, None):
             with self.assertRaises(ValueError):
                 ASSIST.build_start_command(bad)
@@ -958,7 +962,8 @@ class AssistSatellitePlatformTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(satellite._session, session)
         # A button press still replaces the run.
         await satellite.async_start_tap_to_talk()
-        self.assertEqual([c["op"] for c in self.assist_commands()], ["start", "stop", "start"])
+        self.assertEqual([c["op"] for c in self.assist_commands()],
+                         ["start", "stop", "turn_end", "start"])
         await satellite.async_will_remove_from_hass()
 
     async def test_wake_event_on_unavailable_panel_is_dropped(self):
@@ -1002,6 +1007,8 @@ class AssistSatellitePlatformTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(play["op"], "play")
         self.assertEqual(play["url"], "http://192.168.1.2:8123/api/tts_proxy/abc.mp3?authSig=x")
         self.assertTrue(ASSIST.valid_session_id(play["id"]))
+        # The answer names the Assist turn, not just a generic clip.
+        self.assertEqual(play["assist"], session_id)
         self.assertEqual(satellite.tts_finished, 0)
         # Another clip finishing does not end the answer; this one does.
         await self.deliver(f"{BASE}/stat/audio", json.dumps(
@@ -1078,7 +1085,10 @@ class AssistSatellitePlatformTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.pipeline_done.wait(), 1)
         await settle()
         self.assertEqual(self.chunks, [b"\x00\x00", b"\x01\x00"])
-        self.assertEqual([c["op"] for c in self.assist_commands()], ["start", "stop"])
+        # No answer was produced: the panel is told the turn ended.
+        self.assertEqual([c["op"] for c in self.assist_commands()],
+                         ["start", "stop", "turn_end"])
+        self.assertEqual(self.assist_commands()[-1]["id"], session_id)
         self.assertEqual(self.audio_commands(), [])
         # No answer was produced: nothing to finish.
         self.assertEqual(satellite.tts_finished, 0)
@@ -1114,7 +1124,8 @@ class AssistSatellitePlatformTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.pipeline_done.wait(), 1)
         await settle()
         self.assertEqual(self.chunks, [])
-        self.assertEqual([c["op"] for c in self.assist_commands()], ["start", "stop"])
+        self.assertEqual([c["op"] for c in self.assist_commands()],
+                         ["start", "stop", "turn_end"])
 
     async def test_tts_without_url_returns_to_idle(self):
         async def pipeline(satellite, stream):
@@ -1132,6 +1143,8 @@ class AssistSatellitePlatformTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.pipeline_done.wait(), 1)
         await settle()
         self.assertEqual(self.audio_commands(), [])
+        self.assertEqual([c["op"] for c in self.assist_commands()],
+                         ["start", "stop", "turn_end"])
         self.assertEqual(satellite.tts_finished, 1)
 
     async def test_offline_panel_is_unavailable_and_ends_the_run(self):
@@ -1167,7 +1180,9 @@ class AssistSatellitePlatformTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(blocked.wait(), 1)
         session_id = self.assist_commands()[0]["id"]
         await satellite.async_will_remove_from_hass()
-        self.assertEqual(self.assist_commands()[1:], [{"v": 1, "op": "stop", "id": session_id}])
+        self.assertEqual(self.assist_commands()[1:], [
+            {"v": 1, "op": "stop", "id": session_id},
+            {"v": 1, "op": "turn_end", "id": session_id}])
         self.assertEqual(satellite.hass.data["tab5_lvgl"]["assist_satellites"], {})
 
     async def test_new_press_stops_the_previous_session_first(self):
@@ -1181,8 +1196,9 @@ class AssistSatellitePlatformTest(unittest.IsolatedAsyncioTestCase):
         await satellite.async_start_tap_to_talk()
         await asyncio.wait_for(blocked.wait(), 1)
         await satellite.async_start_tap_to_talk()
-        first, stop, second = self.assist_commands()
+        first, stop, turn_end, second = self.assist_commands()
         self.assertEqual(stop, {"v": 1, "op": "stop", "id": first["id"]})
+        self.assertEqual(turn_end, {"v": 1, "op": "turn_end", "id": first["id"]})
         self.assertEqual(second["op"], "start")
         self.assertNotEqual(second["id"], first["id"])
         await satellite.async_will_remove_from_hass()

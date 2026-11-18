@@ -6,9 +6,13 @@ install. The panel side follows the HomeTiles Assist contract v1.
 
 MQTT contract (base = the panel base topic):
 - ``{base}/cmnd/assist``: Bridge to panel, QoS 0, never retained, JSON
-  ``{"v": 1, "op": "start", "id": "<hex>", "max_ms": 15000}`` or
-  ``{"v": 1, "op": "stop", "id": "<hex>"}``. Sealed on the encrypted command
-  channel (data name ``assist``) once the panel is paired.
+  ``{"v": 1, "op": "start", "id": "<hex>", "max_ms": 15000}``,
+  ``{"v": 1, "op": "stop", "id": "<hex>"}`` or
+  ``{"v": 1, "op": "turn_end", "id": "<hex>"}``. Sealed on the encrypted
+  command channel (data name ``assist``) once the panel is paired.
+  ``turn_end`` means the run will not play an answer (error, no speech, no
+  playable TTS), so the panel can end its processing phase at once; older
+  firmware ignores it.
 - ``{base}/stat/assist_audio``: panel to Bridge, QoS 0, not retained, binary
   frames: ``"HTA1"``, id length N (16..32), N id bytes (lowercase hex),
   flags (bit 0 = last frame), uint32 little-endian sequence number, then PCM
@@ -209,6 +213,13 @@ def build_stop_command(session_id: str) -> str:
     return _encode({"v": ASSIST_PROTOCOL_VERSION, "op": "stop", "id": session_id})
 
 
+def build_turn_end_command(session_id: str) -> str:
+    """This run ended without an answer the panel will play."""
+    if not valid_session_id(session_id):
+        raise ValueError("invalid_session_id")
+    return _encode({"v": ASSIST_PROTOCOL_VERSION, "op": "turn_end", "id": session_id})
+
+
 def build_wake_words_command(active: Any, listen: bool | None = None) -> str:
     """Set the panel's active wake words; an empty list turns detection off.
 
@@ -403,6 +414,8 @@ class AudioSession:
         self.finished = False
         self.dropped = 0
         self.stop_sent = False
+        # The scheduled stop publish, so a turn end can follow it on the wire.
+        self.stop_task: asyncio.Task | None = None
 
     def feed(self, frame: AudioFrame) -> bool:
         """Queue a frame of this session; False when it was dropped."""

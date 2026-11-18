@@ -47,6 +47,13 @@ class SpeakerContractTest(unittest.TestCase):
         self.assertNotIn("restart", json.loads(SPEAKER.build_play_command(ID, "tcp://ha:8124/t")))
         self.assertNotIn("restart", json.loads(SPEAKER.build_play_command(
             ID, "tcp://ha:8124/t", live=True, restart=True)))
+        # An Assist answer names its turn; ordinary media does not.
+        self.assertNotIn("assist", json.loads(SPEAKER.build_play_command(ID, "http://h/a")))
+        self.assertEqual(json.loads(SPEAKER.build_play_command(
+            ID, "http://h/a", assist_turn_id="fedcba9876543210"))["assist"],
+            "fedcba9876543210")
+        with self.assertRaises(ValueError):
+            SPEAKER.build_play_command(ID, "http://h/a", assist_turn_id="XYZ")
         self.assertEqual(json.loads(SPEAKER.build_stop_command()), {"v": 1, "op": "stop"})
         self.assertEqual(json.loads(SPEAKER.build_volume_command(0.256)),
                          {"v": 1, "op": "volume", "volume": 0.256})

@@ -53,6 +53,7 @@ from .assist import (
     build_start_command,
     build_stop_command,
     build_mic_command,
+    build_turn_end_command,
     build_wake_words_command,
     new_session_id,
     parse_audio_frame,
@@ -123,6 +124,9 @@ class HomeTilesAssistSatellite(AssistSatelliteEntity):
         self._tts_started = False
         self._tts_request_id: str | None = None
         self._tts_timer: asyncio.TimerHandle | None = None
+        # The Assist session this run belongs to; the answer play command
+        # carries it so the panel can attribute the playback to the turn.
+        self._turn_id: str | None = None
         # The panel's speaker takes Bridge-decoded clips (its retained status).
         self._speaker_streams = False
         self._warnings = RateLimitedWarnings(_WARNING_INTERVAL_S)
@@ -386,7 +390,8 @@ class HomeTilesAssistSatellite(AssistSatelliteEntity):
             return
         session.stop_sent = True
         session.finish()
-        self.hass.async_create_task(self._async_publish_stop(session.session_id))
+        session.stop_task = self.hass.async_create_task(
+            self._async_publish_stop(session.session_id))
 
     @callback
     def _end_session(self) -> None:
@@ -437,6 +442,7 @@ class HomeTilesAssistSatellite(AssistSatelliteEntity):
 
     async def _async_run(self, session: AudioSession, phrase: str | None = None) -> None:
         self._tts_started = False
+        self._turn_id = session.session_id
         try:
             await self.async_accept_pipeline_from_satellite(
                 session.stream(),
@@ -453,8 +459,18 @@ class HomeTilesAssistSatellite(AssistSatelliteEntity):
             if not session.stop_sent:
                 session.stop_sent = True
                 await self._async_publish_stop(session.session_id)
+            elif session.stop_task is not None:
+                # Turn end must not overtake the stop that ends the capture.
+                with contextlib.suppress(Exception):
+                    await session.stop_task
             if self._session is session:
                 self._session = None
+            if self._turn_id == session.session_id:
+                # No play command took over the turn: say so, so the panel
+                # ends its processing phase without waiting for a timeout.
+                if self._tts_request_id is None:
+                    await self._async_publish_turn_end(session.session_id)
+                self._turn_id = None
 
     # Pipeline ------------------------------------------------------------
 
@@ -489,9 +505,10 @@ class HomeTilesAssistSatellite(AssistSatelliteEntity):
         request_id = speaker.new_request_id()
         self._tts_request_id = request_id
         self._arm_tts_timer(request_id)
-        self.hass.async_create_task(self._async_send_answer(request_id, url))
+        self.hass.async_create_task(self._async_send_answer(request_id, url, self._turn_id))
 
-    async def _async_send_answer(self, request_id: str, url: str) -> None:
+    async def _async_send_answer(self, request_id: str, url: str,
+                                 turn_id: str | None) -> None:
         bridge = self._bridge()
         try:
             create_stream = getattr(bridge, "async_create_audio_stream", None)
@@ -504,12 +521,24 @@ class HomeTilesAssistSatellite(AssistSatelliteEntity):
                                   self._base, err)
             sent = await speaker.async_publish_audio_command(
                 self.hass, bridge, self._paired, self._base,
-                speaker.build_play_command(request_id, url), mqtt.async_publish)
+                speaker.build_play_command(request_id, url, assist_turn_id=turn_id),
+                mqtt.async_publish)
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("HomeTiles Assist answer for %s failed: %s", self._base, err)
             sent = False
-        if not sent and self._tts_request_id == request_id:
-            self._finish_tts()
+        if not sent:
+            # The panel will never play this answer; end the turn explicitly.
+            await self._async_publish_turn_end(turn_id)
+            if self._tts_request_id == request_id:
+                self._finish_tts()
+
+    async def _async_publish_turn_end(self, session_id: str | None) -> None:
+        if session_id is None:
+            return
+        try:
+            await self._async_send_assist(build_turn_end_command(session_id))
+        except Exception as err:  # noqa: BLE001 - the panel also times out
+            _LOGGER.debug("HomeTiles Assist turn end for %s failed: %s", self._base, err)
 
     def _arm_tts_timer(self, request_id: str) -> None:
         self._cancel_tts_timer()

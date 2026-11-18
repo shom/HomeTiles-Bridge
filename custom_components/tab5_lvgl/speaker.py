@@ -11,7 +11,9 @@ MQTT contract (base = the panel base topic):
   ``{"v": 1, "op": "resume"}``, ``{"v": 1, "op": "volume", "volume": 0.5}`` or
   ``{"v": 1, "op": "mute", "muted": true}``. Sealed on the encrypted command
   channel (data name ``audio``) once the panel is paired, because play URLs
-  carry Home Assistant's signed access tokens.
+  carry Home Assistant's signed access tokens. A spoken Assist answer adds
+  ``"assist": "<session id>"``; current firmware uses it to keep the assistant
+  turn visible through the playback, older firmware ignores the field.
 - ``{base}/stat/audio``: panel to Bridge, retained JSON status
   ``{"v": 1, "state": "idle"|"playing"|"paused", "volume": 0.5, "muted": false,
   "formats": ["mp3", "wav"], "max_bytes": N, "pausable": true}`` plus ``"id"``
@@ -106,17 +108,24 @@ def _encode(payload: dict[str, Any]) -> str:
 
 
 def build_play_command(request_id: str, url: str, live: bool = False,
-                       lead_ms: int | None = None, restart: bool = False) -> str:
+                       lead_ms: int | None = None, restart: bool = False,
+                       assist_turn_id: str | None = None) -> str:
     """Play url; live (a camera's sound) keeps the panel's buffer short.
 
     lead_ms: how much earlier this sound leaves the Bridge than the camera's
     picture; the panel holds the picture back by its sound delay less that.
     restart: the Bridge plays this clip again from the paused point to
     resume, so the panel may close the stream on a pause (never live).
+    assist_turn_id: the Assist session this clip answers, so the panel can
+    show its assistant turn exactly through the playback.
     """
     if not valid_request_id(request_id):
         raise ValueError("invalid_request_id")
+    if assist_turn_id is not None and not valid_request_id(assist_turn_id):
+        raise ValueError("invalid_assist_turn_id")
     payload = {"v": AUDIO_PROTOCOL_VERSION, "op": "play", "id": request_id, "url": url}
+    if assist_turn_id is not None:
+        payload["assist"] = assist_turn_id
     if live:
         payload["live"] = True
         if lead_ms is not None:
